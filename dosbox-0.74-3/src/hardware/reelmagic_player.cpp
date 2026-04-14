@@ -191,7 +191,8 @@ namespace { class ReelMagic_MediaPlayerImplementation : public ReelMagic_MediaPl
   plm_t                              *_plm;
   plm_frame_t                        *_nextFrame;
   double                              _framerate;
-  Bit8u                               _magicalRSizeOverride;
+  Bit8u                               _magicalDeltaFCodeTable[56]; // pre-computed delta/delta f_code table
+  bool                                _magicalDeltaDeltaActive;
 
   AudioSampleFIFO                     _audioFifo;
 
@@ -226,12 +227,28 @@ namespace { class ReelMagic_MediaPlayerImplementation : public ReelMagic_MediaPl
   }
 
   static void plmDecodeMagicalPictureHeaderCallback(plm_video_t *self, void *user) {
+    ReelMagic_MediaPlayerImplementation *player = (ReelMagic_MediaPlayerImplementation*)user;
+    const unsigned tsn = ((unsigned)self->picture_temporal_reference) % 56;
+    const Bit8u delta = player->_magicalDeltaFCodeTable[tsn];
     switch (self->picture_type) {
     case PLM_VIDEO_PICTURE_TYPE_B:
-      self->motion_backward.r_size = ((ReelMagic_MediaPlayerImplementation*)user)->_magicalRSizeOverride;
+      self->motion_backward.r_size = (self->motion_backward.r_size + delta) % 7;
       //fallthrough
     case PLM_VIDEO_PICTURE_TYPE_PREDICTIVE:
-      self->motion_forward.r_size = ((ReelMagic_MediaPlayerImplementation*)user)->_magicalRSizeOverride;
+      self->motion_forward.r_size = (self->motion_forward.r_size + delta) % 7;
+    }
+  }
+
+  // Debug-only static override callback (used by magicfhack config option)
+  static void plmDecodeMagicalPictureHeaderStaticOverrideCallback(plm_video_t *self, void *user) {
+    ReelMagic_MediaPlayerImplementation *player = (ReelMagic_MediaPlayerImplementation*)user;
+    const Bit8u r_size = player->_magicalDeltaFCodeTable[0]; // repurposed: stores the static r_size
+    switch (self->picture_type) {
+    case PLM_VIDEO_PICTURE_TYPE_B:
+      self->motion_backward.r_size = r_size;
+      //fallthrough
+    case PLM_VIDEO_PICTURE_TYPE_PREDICTIVE:
+      self->motion_forward.r_size = r_size;
     }
   }
 
@@ -253,64 +270,53 @@ namespace { class ReelMagic_MediaPlayerImplementation : public ReelMagic_MediaPl
     }
   }
 
-  unsigned FindMagicalFCode() {
-    //now this is some mighty fine half assery...
-    //i'm sure this is suppoed to be done on a per-picture basis, but for now, this hack seems
-    //to work ok...
-    //the idea here is that MPEG-1 assets with a picture_rate code >= 0x9 in the MPEG sequence
-    //header have screwed up f_code values. i'm not sure why but this may be some form of copy
-    //and/or clone protection for ReelMagic. pictures with a temporal sequence number of either
-    //3 or 8 seem to contain a truthful f_code when a "key" of 0x40044041 (ReelMagic default)
-    //is given to us and a temporal sequence number of 4 seems to contain the truthful f_code
-    //when a "key" of 0xC39D7088 is given to us
-    //
-    //for now, this hack scrubs the MPEG file in search of the first P or B pictures with a
-    //temporal sequence number matching a truthful value based on the player's "magic key"
-    //the player then applies the found f_code value as a global static forward and
-    //backward value for this entire asset.
-    //
-    //ultimately, this should probably be done on a per-picture basis using some sort of
-    //algorithm to translate the screwed-up values on-the-fly...
+  // Pre-compute the delta/delta f_code table for the given magic key.
+  // This implements the "Delta/Delta Approach" from NOTES_MPEG.md which
+  // computes per-picture f_code corrections without requiring random file
+  // access or any file scrubbing. The delta/delta even pattern for a given
+  // magic key generates a repeating 56-TSN delta cycle. Each entry in the
+  // table is the delta value to add to the encoded f_code (mod 7) to yield
+  // the actual f_code for that TSN.
+  bool ComputeMagicalDeltaDeltaTable() {
+    // Map magic key to delta/delta even pattern
+    int even_pattern[4];
+    switch (_config.MagicDecodeKey) {
+    case 0x40044041: // most ReelMagic games (default)
+      even_pattern[0] = 4; even_pattern[1] = 3;
+      even_pattern[2] = 2; even_pattern[3] = 3;
+      break;
+    case 0xC39D7088: // The Horde
+      even_pattern[0] = 1; even_pattern[1] = 3;
+      even_pattern[2] = 3; even_pattern[3] = 3;
+      break;
+    default:
+      LOG(LOG_REELMAGIC, LOG_WARN)("Unknown magic key 0x%08X for delta/delta. Cannot compute f_code table.", (unsigned)_config.MagicDecodeKey);
+      return false;
+    }
 
-    unsigned result = 0;
+    // Pre-compute all 56 delta f_code values using the algorithm from NOTES_MPEG.md:
+    //   result = 2
+    //   for i in range(tsn + 1):
+    //     if i is even: result += even_pattern[(i >> 1) & 3]
+    //     if i is odd:  result += 6
+    //   result %= 7
+    const int odd_increment = 6;
+    int result = 2;
+    for (unsigned tsn = 0; tsn < 56; ++tsn) {
+      if (tsn & 1)
+        result += odd_increment;
+      else
+        result += even_pattern[(tsn >> 1) & 3];
+      _magicalDeltaFCodeTable[tsn] = (Bit8u)(result % 7);
+    }
 
-    const int audio_enabled = plm_get_audio_enabled(_plm);
-    const int loop_enabled  = plm_get_loop(_plm);
-    plm_rewind(_plm);
-    plm_set_audio_enabled(_plm, FALSE);
-    plm_set_loop(_plm, FALSE);
-
-    do {
-      if (plm_buffer_find_start_code(_plm->video_decoder->buffer, PLM_START_PICTURE) == -1) {
-        break;
-      }
-      const unsigned temporal_seqnum = plm_buffer_read(_plm->video_decoder->buffer, 10);
-      const unsigned picture_type = plm_buffer_read(_plm->video_decoder->buffer, 3);
-      if ((picture_type == PLM_VIDEO_PICTURE_TYPE_PREDICTIVE) || (picture_type == PLM_VIDEO_PICTURE_TYPE_B)) {
-        plm_buffer_skip(_plm->video_decoder->buffer, 16); // skip vbv_delay
-        plm_buffer_skip(_plm->video_decoder->buffer, 1); //skip full_px
-        result = plm_buffer_read(_plm->video_decoder->buffer, 3);
-        switch (_config.MagicDecodeKey) {
-        case 0xC39D7088: //The Horde uses this "key"
-          if (temporal_seqnum != 4) result = 0;
-          break;
-
-        default:
-          LOG(LOG_REELMAGIC, LOG_WARN)("Unknown magic key 0x%08X. Defaulting to 0x40044041", (unsigned)_config.MagicDecodeKey);
-          //fall-through
-        case 0x40044041: //most ReelMagic games seem to use this "key"
-          //tsn=3 and tsn=8 seem to contain truthful 
-          if ((temporal_seqnum != 3) && (temporal_seqnum != 8)) result = 0;
-          break;
-        }
-      }
-    } while (result == 0);
-
-    plm_set_loop(_plm, loop_enabled);
-    plm_set_audio_enabled(_plm, audio_enabled);
-    plm_rewind(_plm);
-
-    return result;
+    LOG(LOG_REELMAGIC, LOG_NORMAL)("Delta/delta f_code table computed for magic key 0x%08X:", (unsigned)_config.MagicDecodeKey);
+    LOG(LOG_REELMAGIC, LOG_NORMAL)("  TSN 0-7 deltas: %u %u %u %u %u %u %u %u",
+      _magicalDeltaFCodeTable[0], _magicalDeltaFCodeTable[1],
+      _magicalDeltaFCodeTable[2], _magicalDeltaFCodeTable[3],
+      _magicalDeltaFCodeTable[4], _magicalDeltaFCodeTable[5],
+      _magicalDeltaFCodeTable[6], _magicalDeltaFCodeTable[7]);
+    return true;
   }
 
   void CollectVideoStats() {
@@ -319,14 +325,20 @@ namespace { class ReelMagic_MediaPlayerImplementation : public ReelMagic_MediaPl
     if (_attrs.PictureSize.Width && _attrs.PictureSize.Height) {
       if (_plm->video_decoder->seqh_picture_rate >= 0x9) {
         LOG(LOG_REELMAGIC, LOG_NORMAL)("Detected a magical picture_rate code of 0x%X.", (unsigned)_plm->video_decoder->seqh_picture_rate);
-        const unsigned magical_f_code = _magicalFcodeOverride ? _magicalFcodeOverride: FindMagicalFCode();
-        if (magical_f_code) {
-          _magicalRSizeOverride = magical_f_code - 1;
+        if (_magicalFcodeOverride) {
+          // Debug override: apply static f_code to all pictures (legacy behavior)
+          LOG(LOG_REELMAGIC, LOG_WARN)("Using magicfhack static f_code override: %d", _magicalFcodeOverride);
+          _magicalDeltaFCodeTable[0] = (Bit8u)(_magicalFcodeOverride - 1); // store r_size in slot 0
+          _magicalDeltaDeltaActive = true;
+          plm_video_set_decode_picture_header_callback(_plm->video_decoder, &plmDecodeMagicalPictureHeaderStaticOverrideCallback, this);
+        }
+        else if (ComputeMagicalDeltaDeltaTable()) {
+          _magicalDeltaDeltaActive = true;
           plm_video_set_decode_picture_header_callback(_plm->video_decoder, &plmDecodeMagicalPictureHeaderCallback, this);
-          LOG(LOG_REELMAGIC, LOG_NORMAL)("Applying static %u:%u f_code override", magical_f_code, magical_f_code);
+          LOG(LOG_REELMAGIC, LOG_NORMAL)("Delta/delta per-picture f_code correction active.");
         }
         else {
-          LOG(LOG_REELMAGIC, LOG_WARN)("No magical f_code found. Playback will likely be screwed up!");
+          LOG(LOG_REELMAGIC, LOG_WARN)("No magical f_code recovery available. Playback will likely be screwed up!");
         }
         _plm->video_decoder->framerate = PLM_VIDEO_PICTURE_RATE[0x7 & _plm->video_decoder->seqh_picture_rate];
       }
@@ -359,8 +371,9 @@ public:
     _vgaFps(0.0f),
     _plm(NULL),
     _nextFrame(NULL),
-    _magicalRSizeOverride(0) {
+    _magicalDeltaDeltaActive(false) {
 
+    memset(_magicalDeltaFCodeTable, 0, sizeof(_magicalDeltaFCodeTable));
     memcpy(&_config, &_globalDefaultPlayerConfiguration, sizeof(_config));
     memset(&_attrs, 0, sizeof(_attrs));
     
@@ -461,7 +474,7 @@ public:
 
     if (_drawNextFrame) {
       if (_nextFrame != NULL)
-        plm_frame_to_rgb(_nextFrame, (uint8_t*)outputBuffer, _attrs.PictureSize.Width * 3);
+        plm_frame_to_bgra(_nextFrame, (uint8_t*)outputBuffer, _attrs.PictureSize.Width * 4);
       decodeBufferedAudio();
       _drawNextFrame = false;
     }

@@ -86,9 +86,10 @@ struct VGAOverPalettePixel  : VGAPalettePixel {
 };
 
 struct PlayerPicturePixel {
-  Bit8u red;
-  Bit8u green;
   Bit8u blue;
+  Bit8u green;
+  Bit8u red;
+  Bit8u alpha;
   template <typename T> inline void CopyRGBTo(T& out) const {out.red=red; out.green=green; out.blue=blue;}
   inline bool IsTransparent() const {return false;}
 };
@@ -286,11 +287,13 @@ template <typename T> static inline void RMR_DrawLine_VGAOnlyDup5Vertical(const 
   RenderOutputPixel * const out = _finalMixedRenderLineBuffer;
   for (Bitu i = 0; i < lineWidth; ++i)
     MixPixel(out[i], src[i]);
+  RENDER_DrawLine(_finalMixedRenderLineBuffer);
+  if (_currentRenderLineNumber == 2) {
+    RENDER_DrawLine(_finalMixedRenderLineBuffer); // midpoint duplicate for even distribution
+  }
   if (++_currentRenderLineNumber >= 5) {
     _currentRenderLineNumber = 0;
-    RENDER_DrawLine(_finalMixedRenderLineBuffer);
   }
-  RENDER_DrawLine(_finalMixedRenderLineBuffer);
 } CREATE_RMR_VGA_TYPED_FUNCTIONS(RMR_DrawLine_VGAOnlyDup5Vertical)
 
 template <typename T> static inline void RMR_DrawLine_VGADup5VerticalMPEGSameSize(const T *src) {
@@ -301,9 +304,11 @@ template <typename T> static inline void RMR_DrawLine_VGADup5VerticalMPEGSameSiz
   _mpegPictureBufferPtr += _mpegPictureWidth;
   RENDER_DrawLine(_finalMixedRenderLineBuffer);
 
-  if (++_currentRenderLineNumber >= 5) {
-    _currentRenderLineNumber = 0;
-    RMR_DrawLine_VGADup5VerticalMPEGSameSize(src);
+  if (++_currentRenderLineNumber == 3) {
+    RMR_DrawLine_VGADup5VerticalMPEGSameSize(src); // midpoint duplicate for even distribution
+    _currentRenderLineNumber = 3;
+  }
+  if (_currentRenderLineNumber >= 5) {
     _currentRenderLineNumber = 0;
   }
 } CREATE_RMR_VGA_TYPED_FUNCTIONS(RMR_DrawLine_VGADup5VerticalMPEGSameSize)
@@ -347,9 +352,11 @@ template <typename T> static inline void RMR_DrawLine_VSO_GeneralResizeMPEGToVGA
       ((++_currentRenderLineNumber * _RMR_DrawLine_VSO_GeneralResizeMPEGToVGA_HeightRatio) >> 12)];
   RENDER_DrawLine(_finalMixedRenderLineBuffer);
 
-  if (++_RMR_DrawLine_VSO_GeneralResizeMPEGToVGADup5LineCounter >= 5) {
-    _RMR_DrawLine_VSO_GeneralResizeMPEGToVGADup5LineCounter = 0;
-    RMR_DrawLine_VSO_GeneralResizeMPEGToVGADup5(src);
+  if (++_RMR_DrawLine_VSO_GeneralResizeMPEGToVGADup5LineCounter == 3) {
+    RMR_DrawLine_VSO_GeneralResizeMPEGToVGADup5(src); // midpoint duplicate for even distribution
+    _RMR_DrawLine_VSO_GeneralResizeMPEGToVGADup5LineCounter = 3;
+  }
+  if (_RMR_DrawLine_VSO_GeneralResizeMPEGToVGADup5LineCounter >= 5) {
     _RMR_DrawLine_VSO_GeneralResizeMPEGToVGADup5LineCounter = 0;
   }
 } CREATE_RMR_VGA_TYPED_FUNCTIONS(RMR_DrawLine_VSO_GeneralResizeMPEGToVGADup5)
@@ -389,7 +396,7 @@ static void SetupVideoMixer(const bool updateRenderMode) {
   //a miserable combination of variables...
   if (_mpegDictatesOutputSize && mpeg) {
     _renderWidth = _mpegPictureWidth;
-    _renderHeight = _mpegPictureWidth;
+    _renderHeight = _mpegPictureHeight;
   }
   else if (_vgaDup5Enabled) {
     _renderWidth  = _vgaWidth;

@@ -683,8 +683,20 @@ dosurface:
 			sdl.opengl.framebuf=malloc(width*height*4);		//32 bit color
 		}
 		sdl.opengl.pitch=width*4;
-//		glViewport(sdl.clip.x,sdl.clip.y,sdl.clip.w,sdl.clip.h);
-		if(sdl.clip.x ==0 && sdl.clip.y ==0 && sdl.desktop.fullscreen && !sdl.desktop.full.fixed && (sdl.clip.w != sdl.surface->w || sdl.clip.h != sdl.surface->h)) { 
+		/* Integer scaling: when using nearest-neighbor filtering in fullscreen,
+		   compute the largest integer multiple of the source dimensions that fits
+		   the display. This ensures every source pixel maps to an identically-sized
+		   block of display pixels for perfect sharpness. */
+		if (sdl.desktop.fullscreen && !sdl.opengl.bilinear && width && height) {
+			int scaleX = sdl.surface->w / (int)width;
+			int scaleY = sdl.surface->h / (int)height;
+			int scale = (scaleX < scaleY) ? scaleX : scaleY;
+			if (scale < 1) scale = 1;
+			int vw = (int)width * scale;
+			int vh = (int)height * scale;
+			glViewport((sdl.surface->w - vw) / 2, (sdl.surface->h - vh) / 2, vw, vh);
+		}
+		else if(sdl.clip.x ==0 && sdl.clip.y ==0 && sdl.desktop.fullscreen && !sdl.desktop.full.fixed && (sdl.clip.w != sdl.surface->w || sdl.clip.h != sdl.surface->h)) { 
 		//	LOG_MSG("attempting to fix the centering to %d %d %d %d",(sdl.surface->w-sdl.clip.w)/2,(sdl.surface->h-sdl.clip.h)/2,sdl.clip.w,sdl.clip.h);
 			glViewport((sdl.surface->w-sdl.clip.w)/2,(sdl.surface->h-sdl.clip.h)/2,sdl.clip.w,sdl.clip.h);
 		}

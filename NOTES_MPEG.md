@@ -259,12 +259,19 @@ for more information on this.
 
 
 
-# Current Emulator Workaround
+# Current Emulator Implementation
 
-The current implementation of the emulator uses the  "Find a Truthful
-`f_code` Approach" mentioned above. However, soon it will be updated
-to use the "Delta/Delta" approach as this is needed to ensure 100%
-compatibility accross all currently known ReelMagic games.
+The current implementation of the emulator uses the "Delta/Delta Approach"
+mentioned above. This computes per-picture `f_code` corrections dynamically
+at decode time using a pre-computed 56-entry lookup table derived from the
+magic key's delta/delta even pattern. No file scrubbing or random access
+is required —  the table is computed once at media handle open time and
+applied via a picture header decode callback for every P and B picture.
+
+Previously, the emulator used the "Find a Truthful `f_code` Approach" which
+required scrubbing the file at open time and applied a single static `f_code`
+to all pictures. That approach could not handle files encoded with multiple
+unique `f_code` values and had limitations with streaming mode.
 
 
 # Analyzing and Inspecting "Magical" MPEG-1 Files
